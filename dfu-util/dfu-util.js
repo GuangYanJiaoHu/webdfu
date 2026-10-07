@@ -613,35 +613,44 @@ var device = null;
                     device.logWarning("Failed to clear status");
                 }
 
+                // ---- 阶段控制 ----
+                let currentPhase = "idle";     // "erasing" | "copying" | "idle"
                 let detachTriggered = false;
-                let copyPhaseStarted = false;
+                let progressLocked = false;
+
                 const originalLogProgress = device.logProgress;
                 const originalLogInfo = device.logInfo;
 
-                // 拦截 logInfo，检测是否进入拷贝阶段
+                // 通过 logInfo 消息切换阶段
                 device.logInfo = function(msg) {
                     originalLogInfo.call(device, msg);
-                    if (msg === "Copying data from browser to DFU device") {
-                        copyPhaseStarted = true;
+                    if (typeof msg === "string") {
+                        if (msg.indexOf("Erasing") !== -1) {
+                            currentPhase = "erasing";
+                            console.log("[WebDFU] Phase -> erasing");
+                        } else if (msg.indexOf("Copying") !== -1) {
+                            currentPhase = "copying";
+                            console.log("[WebDFU] Phase -> copying");
+                        }
                     }
                 };
 
-                // 拦截 logProgress：
-                // - 擦除阶段：原样更新，不干预
-                // - 拷贝阶段：达到 90% 时固定进度条并触发 Detach，之后冻结进度
+                // 只在拷贝阶段 90% 时锁定进度条并触发 detach
                 device.logProgress = function(done, total) {
-                    if (detachTriggered) {
+                    if (progressLocked) {
                         return;
                     }
-                    if (copyPhaseStarted && total > 0 && done / total >= 0.9) {
-                        // 把进度条锁定在 90%
-                        originalLogProgress.call(device, Math.floor(total * 0.9), total);
+                    if (currentPhase === "copying" && total > 0 && done / total >= 0.9) {
+                        const lockValue = Math.floor(total * 0.9);
+                        originalLogProgress.call(device, lockValue, total);
+                        progressLocked = true;
                         detachTriggered = true;
-                        console.log("Copy progress reached 90%, triggering detach...");
-                        detachButton.click();
-                    } else {
-                        originalLogProgress.call(device, done, total);
+                        console.log("[WebDFU] Copy reached 90%, locking progress and triggering detach...");
+                        setTimeout(function() { detachButton.click(); }, 50);
+                        return;
                     }
+                    // 擦除阶段与拷贝 90% 之前：原样透传
+                    originalLogProgress.call(device, done, total);
                 };
 
                 try {
@@ -650,17 +659,13 @@ var device = null;
                 } catch (error) {
                     if (!detachTriggered) {
                         logError(error);
+                    } else {
+                        console.log("[WebDFU] Download interrupted by detach (expected).");
                     }
                 } finally {
                     device.logProgress = originalLogProgress;
                     device.logInfo = originalLogInfo;
                     setLogContext(null);
-                    if (!manifestationTolerant && !detachTriggered) {
-                        device.waitDisconnected(5000).then(
-                            dev => { onDisconnect(); device = null; },
-                            error => { console.log("Device unexpectedly tolerated manifestation."); }
-                        );
-                    }
                 }
             }
         });
