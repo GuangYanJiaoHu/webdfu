@@ -613,15 +613,34 @@ var device = null;
                     device.logWarning("Failed to clear status");
                 }
 
-                const expectedSize = firmwareFile.byteLength;
                 let detachTriggered = false;
+                let copyPhaseStarted = false;
                 const originalLogProgress = device.logProgress;
+                const originalLogInfo = device.logInfo;
+
+                // 拦截 logInfo，检测是否进入拷贝阶段
+                device.logInfo = function(msg) {
+                    originalLogInfo.call(device, msg);
+                    if (msg === "Copying data from browser to DFU device") {
+                        copyPhaseStarted = true;
+                    }
+                };
+
+                // 拦截 logProgress：
+                // - 擦除阶段：原样更新，不干预
+                // - 拷贝阶段：达到 90% 时固定进度条并触发 Detach，之后冻结进度
                 device.logProgress = function(done, total) {
-                    originalLogProgress.call(device, done, total);
-                    if (!detachTriggered && total === expectedSize && done / total >= 0.9) {
+                    if (detachTriggered) {
+                        return;
+                    }
+                    if (copyPhaseStarted && total > 0 && done / total >= 0.9) {
+                        // 把进度条锁定在 90%
+                        originalLogProgress.call(device, Math.floor(total * 0.9), total);
                         detachTriggered = true;
-                        console.log("Progress reached 90%, triggering detach...");
+                        console.log("Copy progress reached 90%, triggering detach...");
                         detachButton.click();
+                    } else {
+                        originalLogProgress.call(device, done, total);
                     }
                 };
 
@@ -634,6 +653,7 @@ var device = null;
                     }
                 } finally {
                     device.logProgress = originalLogProgress;
+                    device.logInfo = originalLogInfo;
                     setLogContext(null);
                     if (!manifestationTolerant && !detachTriggered) {
                         device.waitDisconnected(5000).then(
